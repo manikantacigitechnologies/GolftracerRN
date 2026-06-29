@@ -117,12 +117,63 @@ class HeyCyanGlassesAPI {
   }
 
   /**
-   * Download the latest video from glasses (switches to WiFi transfer mode)
+   * Enter transfer mode - creates WiFi P2P group and tells glasses to connect.
+   * Returns the glasses IP (if received via BLE), or 'waiting'/'timeout'
+   */
+  async enterTransferMode(): Promise<string> {
+    if (!this.isAvailable) throw new Error('HeyCyan SDK only available on Android');
+    return HeyCyanGlasses.enterTransferMode();
+  }
+
+  /**
+   * Connect to glasses WiFi using WifiNetworkSpecifier (Android 10+).
+   * Fallback if P2P doesn't auto-connect.
+   */
+  async connectToGlassesWifi(ssid: string, password: string = '123456789'): Promise<boolean> {
+    if (!this.isAvailable) throw new Error('HeyCyan SDK only available on Android');
+    return HeyCyanGlasses.connectToGlassesWifi(ssid, password);
+  }
+
+  /**
+   * Open device WiFi settings so user can connect to glasses hotspot
+   */
+  async openWifiSettings(): Promise<boolean> {
+    if (!this.isAvailable) throw new Error('HeyCyan SDK only available on Android');
+    return HeyCyanGlasses.openWifiSettings();
+  }
+
+  /**
+   * Download the latest video from glasses (transfer mode must be active)
    * Returns the local file path of the downloaded video
    */
   async downloadLatestVideo(): Promise<string> {
     if (!this.isAvailable) throw new Error('HeyCyan SDK only available on Android');
     return HeyCyanGlasses.downloadLatestVideo();
+  }
+
+  /**
+   * Download ALL media from glasses (photos + videos).
+   * Returns array of local file paths.
+   */
+  async downloadAllMedia(): Promise<string[]> {
+    if (!this.isAvailable) throw new Error('HeyCyan SDK only available on Android');
+    return HeyCyanGlasses.downloadAllMedia();
+  }
+
+  /**
+   * Cleanup transfer mode - unbind network so internet works again
+   */
+  async cleanupTransferMode(): Promise<boolean> {
+    if (!this.isAvailable) throw new Error('HeyCyan SDK only available on Android');
+    return HeyCyanGlasses.cleanupTransferMode();
+  }
+
+  /**
+   * Get current WiFi debug info: { ssid, gatewayIp, deviceIp, isConnected }
+   */
+  async getWifiInfo(): Promise<{ ssid: string; gatewayIp: string; deviceIp: string; isConnected: boolean }> {
+    if (!this.isAvailable) throw new Error('HeyCyan SDK only available on Android');
+    return HeyCyanGlasses.getWifiInfo();
   }
 
   /**

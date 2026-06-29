@@ -20,10 +20,12 @@ import {
   Alert,
   Platform,
   ScrollView,
+  Linking,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { Video, ResizeMode } from 'expo-av';
 
 import { RootStackParamList, ClubType } from '../types';
 import { COLORS, FONTS } from '../utils/theme';
@@ -51,11 +53,12 @@ export default function GlassesScreen() {
   const [shotMetrics, setShotMetrics] = useState<ShotMetrics | null>(null);
   const [calculating, setCalculating] = useState(false);
 
-  // Shot flow phase: idle → recording → recorded → downloading → ready → results
-  const [phase, setPhase] = useState<'idle' | 'recording' | 'recorded' | 'downloading' | 'ready' | 'results'>('idle');
+  // Shot flow phase: idle → recording → recorded → wifi-connect → downloading → ready → results
+  const [phase, setPhase] = useState<'idle' | 'recording' | 'recorded' | 'wifi-connect' | 'downloading' | 'ready' | 'results'>('idle');
 
   const durationTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const launchMonitorRef = useRef<LaunchMonitor | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   // Check if SDK is available
   const isAvailable = heyCyanGlasses.available;
@@ -183,17 +186,75 @@ export default function GlassesScreen() {
     }
   };
 
-  const handleDownloadVideo = async () => {
+  const handleEnterTransferMode = async () => {
+    setPhase('downloading');
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      // Step 1: Tell glasses to enable WiFi hotspot via BLE
+      console.log('[Glasses] Step 1: Sending transfer mode command...');
+      const transferResult = await heyCyanGlasses.enterTransferMode().catch(() => 'timeout');
+      console.log('[Glasses] Transfer mode result:', transferResult);
+
+      // Step 2: Auto-connect to glasses WiFi using WifiNetworkSpecifier
+      // This shows a system WiFi picker filtered to "HeyCyan" networks
+      console.log('[Glasses] Step 2: Connecting to glasses WiFi...');
+      const connectResult = await heyCyanGlasses.connectToGlassesWifi('HeyCyan', '123456789').catch((e: any) => {
+        console.log('[Glasses] Auto-connect failed:', e.message, '- trying DIRECT- prefix...');
+        // Try alternative prefix
+        return heyCyanGlasses.connectToGlassesWifi('DIRECT-', '123456789').catch(() => null);
+      });
+      console.log('[Glasses] WiFi connect result:', connectResult);
+
+      if (!connectResult) {
+        // Auto-connect failed, show manual flow
+        setDownloadError('Could not auto-connect to glasses WiFi. Please connect manually.');
+        setPhase('wifi-connect');
+        setDownloading(false);
+        return;
+      }
+
+      // Step 3: Download the video
+      console.log('[Glasses] Step 3: Downloading video...');
+      const filePath = await heyCyanGlasses.downloadLatestVideo();
+      console.log('[Glasses] Downloaded:', filePath);
+      setVideoPath(filePath);
+      setPhase('ready');
+      setDownloading(false);
+
+      // Step 4: Cleanup - unbind from glasses WiFi so internet works again
+      heyCyanGlasses.cleanupTransferMode().catch(() => {});
+    } catch (e: any) {
+      const msg = e.message || 'Download failed';
+      console.log('[Glasses] Download error:', msg);
+      setDownloadError(msg);
+      setPhase('wifi-connect'); // Show manual WiFi connect as fallback
+      setDownloading(false);
+    }
+  };
+
+  const handleOpenWifiSettings = async () => {
+    try {
+      await heyCyanGlasses.openWifiSettings();
+    } catch {
+      Linking.openSettings().catch(() => {});
+    }
+  };
+
+  const handleRetryDownload = async () => {
     setDownloading(true);
     setPhase('downloading');
+    setDownloadError(null);
     try {
       const filePath = await heyCyanGlasses.downloadLatestVideo();
       setVideoPath(filePath);
       setPhase('ready');
       setDownloading(false);
+      heyCyanGlasses.cleanupTransferMode().catch(() => {});
     } catch (e: any) {
-      Alert.alert('Download Failed', e.message);
-      setPhase('recorded');
+      const msg = e.message || 'Download failed. Is phone connected to glasses WiFi?';
+      setDownloadError(msg);
+      setPhase('wifi-connect');
       setDownloading(false);
     }
   };
@@ -244,6 +305,7 @@ export default function GlassesScreen() {
     setVideoPath(null);
     setShotMetrics(null);
     setCalculating(false);
+    setDownloadError(null);
   };
 
   // ── Not available on iOS ───────────────────────────────
@@ -345,12 +407,49 @@ export default function GlassesScreen() {
             <View style={styles.controlsSection}>
               <Text style={styles.sectionTitle}>Video Recorded ✓</Text>
               <Text style={styles.instructionText}>
-                Recorded {recordingDuration}s. Download the video from glasses to your phone.
+                Recorded {recordingDuration}s. Import the video from glasses to your phone.
               </Text>
-              <TouchableOpacity style={[styles.actionBtn, styles.downloadBtn]} onPress={handleDownloadVideo}>
+              <TouchableOpacity style={[styles.actionBtn, styles.downloadBtn]} onPress={handleEnterTransferMode}>
                 <Ionicons name="cloud-download" size={22} color={COLORS.textDark} />
-                <Text style={styles.actionBtnText}>Download from Glasses</Text>
+                <Text style={styles.actionBtnText}>Import Video from Glasses</Text>
               </TouchableOpacity>
+              <TouchableOpacity style={styles.skipBtn} onPress={() => setPhase('ready')}>
+                <Text style={styles.skipBtnText}>Skip download, just calculate</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* ── PHASE: WIFI-CONNECT (fallback if P2P auto-connect fails) ── */}
+          {phase === 'wifi-connect' && (
+            <View style={styles.controlsSection}>
+              <Text style={styles.sectionTitle}>📶 Connect to Glasses WiFi</Text>
+              <Text style={styles.instructionText}>
+                Auto-import failed. Please connect to the glasses WiFi manually, then tap "Retry Download".
+              </Text>
+
+              <View style={styles.wifiSteps}>
+                <Text style={styles.wifiStep}>1️⃣  Tap "Open WiFi Settings" below</Text>
+                <Text style={styles.wifiStep}>2️⃣  Connect to the glasses WiFi (e.g. "HeyCyan_..." or "DIRECT-...")</Text>
+                <Text style={styles.wifiStep}>3️⃣  Come back and tap "Retry Download"</Text>
+              </View>
+
+              {downloadError && (
+                <View style={styles.errorBox}>
+                  <Ionicons name="warning" size={16} color={COLORS.error} />
+                  <Text style={styles.errorText}>{downloadError}</Text>
+                </View>
+              )}
+
+              <TouchableOpacity style={[styles.actionBtn, { backgroundColor: '#6C63FF' }]} onPress={handleOpenWifiSettings}>
+                <Ionicons name="wifi" size={22} color={COLORS.white} />
+                <Text style={[styles.actionBtnText, { color: COLORS.white }]}>Open WiFi Settings</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={[styles.actionBtn, styles.downloadBtn]} onPress={handleRetryDownload}>
+                <Ionicons name="download" size={22} color={COLORS.textDark} />
+                <Text style={styles.actionBtnText}>Retry Download</Text>
+              </TouchableOpacity>
+
               <TouchableOpacity style={styles.skipBtn} onPress={() => setPhase('ready')}>
                 <Text style={styles.skipBtnText}>Skip download, just calculate</Text>
               </TouchableOpacity>
@@ -361,9 +460,9 @@ export default function GlassesScreen() {
           {phase === 'downloading' && (
             <View style={styles.controlsSection}>
               <ActivityIndicator size="large" color={COLORS.accent} />
-              <Text style={styles.instructionText}>Downloading video from glasses...</Text>
+              <Text style={[styles.instructionText, { textAlign: 'center', marginTop: 12 }]}>Importing video from glasses...</Text>
               <Text style={styles.subInstructionText}>
-                Make sure your phone is on the glasses WiFi hotspot
+                Setting up WiFi connection and downloading
               </Text>
             </View>
           )}
@@ -373,7 +472,16 @@ export default function GlassesScreen() {
             <View style={styles.controlsSection}>
               <Text style={styles.sectionTitle}>Calculate Shot</Text>
               {videoPath && (
-                <Text style={styles.videoPathText}>📹 Video: {videoPath.split('/').pop()}</Text>
+                <>
+                  <Video
+                    source={{ uri: videoPath }}
+                    style={styles.videoPreview}
+                    useNativeControls
+                    resizeMode={ResizeMode.CONTAIN}
+                    isLooping={false}
+                  />
+                  <Text style={styles.videoPathText}>📹 {videoPath.split('/').pop()}</Text>
+                </>
               )}
               <TouchableOpacity style={styles.actionBtn} onPress={handleCalculateShot} disabled={calculating}>
                 {calculating ? (
@@ -392,6 +500,17 @@ export default function GlassesScreen() {
           {phase === 'results' && shotMetrics && (
             <View style={styles.controlsSection}>
               <Text style={styles.sectionTitle}>Shot Results</Text>
+
+              {videoPath && (
+                <Video
+                  source={{ uri: videoPath }}
+                  style={styles.videoPreview}
+                  useNativeControls
+                  resizeMode={ResizeMode.CONTAIN}
+                  isLooping={false}
+                />
+              )}
+
               <View style={styles.resultsCard}>
                 <ResultRow label="Ball Speed" value={`${shotMetrics.ballSpeed} mph`} />
                 <ResultRow label="Carry" value={`${shotMetrics.carryDistance} yds`} />
@@ -575,7 +694,16 @@ const styles = StyleSheet.create({
   resetBtnText: { fontSize: 13, color: COLORS.textMuted },
 
   // Video path
-  videoPathText: { fontSize: 11, color: COLORS.textMuted, marginBottom: 8 },
+  videoPathText: { fontSize: 11, color: COLORS.textMuted, marginBottom: 8, textAlign: 'center' },
+
+  // Video preview
+  videoPreview: { width: '100%', height: 200, borderRadius: 12, backgroundColor: '#000', marginBottom: 12 },
+
+  // WiFi connect
+  wifiSteps: { backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 12, padding: 14, marginVertical: 12, gap: 8 },
+  wifiStep: { fontSize: 13, color: COLORS.textSecondary, lineHeight: 20 },
+  errorBox: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(255,59,48,0.1)', borderRadius: 10, padding: 12, marginBottom: 8 },
+  errorText: { fontSize: 12, color: COLORS.error, flex: 1 },
 
   // Results
   resultsCard: { backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 12, padding: 14, borderWidth: 1, borderColor: 'rgba(255,215,0,0.15)', marginTop: 8 },
